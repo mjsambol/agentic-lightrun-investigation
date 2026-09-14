@@ -1,0 +1,30 @@
+name: jira-lightrun-demo
+
+services:
+  agent:
+    image: ${JIRA_AGENT_IMAGE:?Set JIRA_AGENT_IMAGE}:${JIRA_AGENT_TAG:-latest}
+    pull_policy: always
+    env_file:
+      - ${AGENT_ENV_FILE:-jira-agent.env}
+    restart: unless-stopped
+    expose:
+      - "8080"
+
+  caddy:
+    image: caddy:2-alpine
+    environment:
+      WEBHOOK_DOMAIN: ${WEBHOOK_DOMAIN}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+    depends_on:
+      - agent
+
+volumes:
+  caddy_data:
+  caddy_config:
