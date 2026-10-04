@@ -7,6 +7,12 @@
 3. uses Lightrun to observe the running application;
 4. posts the investigation result back to Jira.
 
+<img width="1470" height="948" alt="jira-agent-image1" src="https://github.com/user-attachments/assets/9a7de842-4f25-472e-bfbd-f95936d4b5fa" />
+
+<img width="556" height="768" alt="jira-agent-image2" src="https://github.com/user-attachments/assets/d2478ad0-174f-4e67-86c8-46325a3df5a6" />
+
+---
+
 The script supports two ways to discover tickets:
 
 - `JIRA_TRIGGER_MODE=poll` searches Jira every 30 seconds. This is the default behavior, suitable for running in a local demo.
