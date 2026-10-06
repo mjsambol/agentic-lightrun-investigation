@@ -3,9 +3,13 @@
 `agentic_lr_investigation.py` demonstrates an agent that:
 
 1. receives an investigation request from a Jira Task;
-2. reads the relevant source through GitHub;
+2. identifies and reads the relevant source code through GitHub;
 3. uses Lightrun to observe the running application;
 4. posts the investigation result back to Jira.
+
+<img width="1088" height="692" alt="Lightrun-Jira-enrichment-agent" src="https://github.com/user-attachments/assets/3e76f271-f663-44cb-ac49-e3791cda2a2e" />
+
+Sample agent posts to Jira tickets:
 
 <img width="1470" height="948" alt="jira-agent-image1" src="https://github.com/user-attachments/assets/9a7de842-4f25-472e-bfbd-f95936d4b5fa" />
 
@@ -13,13 +17,14 @@
 
 ---
 
-The script supports two ways to discover tickets:
+As can be seen in the diagram above, the agent supports three ways to discover tickets:
 
 - `JIRA_TRIGGER_MODE=poll` searches Jira every 30 seconds. This is the default behavior, suitable for running in a local demo.
 - `JIRA_TRIGGER_MODE=webhook` runs a small HTTP server. Jira calls it as soon as
   an issue is created. Requires a publicly accessible endpoint.
-
-This guide focuses on webhook mode and a small Ubuntu AWS EC2 instance.
+- In both of the above configurations there is **also** an endpoint that can be called by a human or other automation to trigger the agent.
+- 
+This guide focuses on setting up the agent to run in webhook mode on a small Ubuntu AWS EC2 instance.
 
 ## Demo architecture
 
