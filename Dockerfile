@@ -16,10 +16,15 @@ RUN useradd --create-home --uid 10001 agent \
 COPY --chown=agent:agent logging_utils.py ./
 COPY --chown=agent:agent agentic_lr_investigation.py ./
 COPY --chown=agent:agent cache_git_files.py ./
+COPY --chown=agent:agent repository_context.py ./
+COPY --chown=agent:agent repository_tools.py ./
+COPY --chown=agent:agent diagnose_github.py ./
 COPY --chown=agent:agent jira_access_tools.py ./
 COPY --chown=agent:agent jira_webhook_server.py ./
 
 RUN python -m compileall -q .
+
+RUN mkdir -p /app/.agent-source-cache && chown agent:agent /app/.agent-source-cache
 
 USER agent
 

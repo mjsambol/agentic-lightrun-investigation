@@ -1,14 +1,21 @@
 import asyncio
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 import re
+from time import time
 from typing import Any
 from urllib.parse import quote
 
 import httpx
 from langchain.tools import tool
+from repository_context import (
+    cache_ttl_seconds, charge_github_request, check_repository, repository_session,
+)
+
+logger = logging.getLogger(__name__)
 
 GITHUB_RATE_LIMIT_RETRY_PATTERN = re.compile(
     r"GitHub API rate limit exceeded\.\s*Retry after (\d+(?:\.\d+)?)s\.",
@@ -20,7 +27,7 @@ FULL_COMMIT_SHA_PATTERN = re.compile(r"^[0-9a-fA-F]{40}$")
 # Fixed security boundary
 # ---------------------------------------------------------------------------
 
-SOURCE_CACHE_ROOT = Path(".agent-source-cache").resolve()
+SOURCE_CACHE_ROOT = Path(os.getenv("REPO_CACHE_ROOT", ".agent-source-cache")).resolve()
 
 GITHUB_API_ROOT = "https://api.github.com"
 GITHUB_API_VERSION = "2022-11-28"
@@ -29,8 +36,8 @@ MAX_SOURCE_SIZE = 10 * 1024 * 1024  # 10 MiB
 MAX_LINES_PER_READ = 1000
 DEFAULT_INITIAL_READ_LINES = 400
 
-# A demo run should analyze one stable revision. Resolving a branch once also
-# prevents parallel candidate-file reads from repeating the same GitHub call.
+# Sessions pin refs for one investigation, including parallel file reads.
+# The fallback dictionary is used only by standalone callers/tests.
 _resolved_refs: dict[tuple[str, str, str], str] = {}
 _ref_resolution_lock = asyncio.Lock()
 
@@ -42,9 +49,13 @@ _ref_resolution_lock = asyncio.Lock()
 class GitHubAPIError(RuntimeError):
     """A GitHub API response that preserves its HTTP status for callers."""
 
-    def __init__(self, status_code: int, detail: str) -> None:
+    def __init__(self, status_code: int, detail: str, *, endpoint: str = "",
+                 request_id: str = "") -> None:
         self.status_code = status_code
-        super().__init__(f"GitHub API returned HTTP {status_code}: {detail}")
+        self.endpoint = endpoint
+        self.request_id = request_id
+        location = f" for GET {endpoint}" if endpoint else ""
+        super().__init__(f"GitHub API returned HTTP {status_code}{location}: {detail}")
 
 
 class RepositoryFileNotFoundError(FileNotFoundError):
@@ -62,8 +73,8 @@ class RepositoryFileNotFoundError(FileNotFoundError):
         self.repository_path = repository_path
         self.commit_sha = commit_sha
         super().__init__(
-            f"{owner}/{repo}:{repository_path} does not exist at commit "
-            f"{commit_sha}"
+            f"{owner}/{repo}:{repository_path} was not accessible at commit "
+            f"{commit_sha} (HTTP 404: missing path or insufficient repository access)"
         )
 
 
@@ -134,21 +145,37 @@ def calculate_git_blob_sha(content: bytes) -> str:
     return hashlib.sha1(header + content).hexdigest()
 
 
+async def github_get(client: httpx.AsyncClient, url: str, **kwargs) -> httpx.Response:
+    """Count and log requests without exposing credentials or response bodies."""
+    charge_github_request()
+    endpoint = httpx.URL(url).path
+    logger.info("GitHub GET %s", endpoint)
+    try:
+        response = await client.get(url, **kwargs)
+    except httpx.HTTPError:
+        logger.warning("GitHub GET %s failed before an HTTP response", endpoint)
+        raise
+    request_id = response.headers.get("x-github-request-id", "")
+    log = logger.warning if response.is_error else logger.info
+    log("GitHub GET %s -> HTTP %s (request_id=%s)",
+        endpoint, response.status_code, request_id or "unavailable")
+    try:
+        response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        raise GitHubAPIError(
+            response.status_code, response.text[:1000],
+            endpoint=endpoint, request_id=request_id,
+        ) from exc
+    return response
+
+
 async def github_get_json(
     client: httpx.AsyncClient,
     url: str,
     *,
     params: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    response = await client.get(url, params=params)
-
-    try:
-        response.raise_for_status()
-    except httpx.HTTPStatusError as exc:
-        detail = response.text[:1000]
-
-        # Never include request headers, since they contain the PAT.
-        raise GitHubAPIError(response.status_code, detail) from exc
+    response = await github_get(client, url, params=params)
 
     payload = response.json()
 
@@ -163,21 +190,26 @@ async def resolve_ref_to_commit(client: httpx.AsyncClient, owner: str, repo: str
     Resolve a branch, tag, abbreviated SHA, or full SHA to an immutable
     40-character commit SHA.
     """
+    check_repository(owner, repo)
+    session = repository_session.get()
+    resolved_refs = session.resolved_refs if session else _resolved_refs
     clean_ref = ref.strip()
 
     if not clean_ref:
         raise ValueError("Git reference must not be empty")
 
     if FULL_COMMIT_SHA_PATTERN.fullmatch(clean_ref):
+        if session:
+            session.observed_commits.add(clean_ref.lower())
         return clean_ref.lower()
 
     cache_key = (owner, repo, clean_ref)
-    cached_commit = _resolved_refs.get(cache_key)
+    cached_commit = resolved_refs.get(cache_key)
     if cached_commit is not None:
         return cached_commit
 
     async with _ref_resolution_lock:
-        cached_commit = _resolved_refs.get(cache_key)
+        cached_commit = resolved_refs.get(cache_key)
         if cached_commit is not None:
             return cached_commit
 
@@ -199,7 +231,9 @@ async def resolve_ref_to_commit(client: httpx.AsyncClient, owner: str, repo: str
             )
 
         resolved_commit = commit_sha.lower()
-        _resolved_refs[cache_key] = resolved_commit
+        resolved_refs[cache_key] = resolved_commit
+        if session:
+            session.observed_commits.add(resolved_commit)
         return resolved_commit
 
 
@@ -271,21 +305,13 @@ async def download_blob(client: httpx.AsyncClient, owner: str, repo: str, blob_s
         f"git/blobs/{blob_sha}"
     )
 
-    response = await client.get(
-        url,
+    response = await github_get(
+        client, url,
         headers={
             **github_headers(),
             "Accept": "application/vnd.github.raw+json",
         },
     )
-
-    try:
-        response.raise_for_status()
-    except httpx.HTTPStatusError as exc:
-        raise RuntimeError(
-            f"GitHub blob request returned HTTP "
-            f"{response.status_code}: {response.text[:1000]}"
-        ) from exc
 
     return response.content
 
@@ -441,13 +467,25 @@ async def cache_github_file(owner: str, repo: str, ref: str, target_file: str) -
             commit_sha,
             repository_path,
         )
-        if cached_manifest is not None:
+        if cached_manifest is not None and (
+            time() - cached_manifest.get("validated_at", 0) < cache_ttl_seconds()
+        ):
             return {**cached_manifest, "cache_hit": True}
 
         metadata = await get_file_metadata(client, owner, repo, repository_path, commit_sha)
 
         expected_blob_sha = metadata["blob_sha"]
         expected_size = metadata["size"]
+
+        if cached_manifest is not None and (
+            cached_manifest["git_blob_sha"] == expected_blob_sha
+            and cached_manifest["size_bytes"] == expected_size
+        ):
+            cached_manifest["validated_at"] = time()
+            manifest_path(owner, repo, commit_sha, repository_path).write_text(
+                json.dumps(cached_manifest, indent=2, sort_keys=True), encoding="utf-8"
+            )
+            return {**cached_manifest, "cache_hit": True}
 
         content = await download_blob(client, owner, repo, expected_blob_sha)
 
@@ -500,6 +538,7 @@ async def cache_github_file(owner: str, repo: str, ref: str, target_file: str) -
         "line_count": count_source_lines(content),
         "local_path": str(destination),
         "cache_hit": False,
+        "validated_at": time(),
     }
 
     manifest_file = manifest_path(
@@ -560,8 +599,9 @@ async def cache_and_read_github_file(
             "commit_sha": exc.commit_sha,
             "repository_path": exc.repository_path,
             "message": (
-                f"The file {exc.repository_path!r} does not exist in "
-                f"{exc.owner}/{exc.repo} at commit {exc.commit_sha}. "
+                f"The file {exc.repository_path!r} was not accessible in "
+                f"{exc.owner}/{exc.repo} at commit {exc.commit_sha} (HTTP 404). "
+                "This can mean a missing path or insufficient repository access. "
                 "Search the repository again and retry with an exact path."
             ),
         }

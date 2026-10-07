@@ -7,6 +7,8 @@ services:
     env_file:
       - ${AGENT_ENV_FILE:-jira-agent.env}
     restart: unless-stopped
+    volumes:
+      - repository_cache:/app/.agent-source-cache
     expose:
       - "8080"
 
@@ -26,5 +28,6 @@ services:
       - agent
 
 volumes:
+  repository_cache:
   caddy_data:
   caddy_config:

@@ -6,6 +6,7 @@ tradeoff: accepted work is lost if the process stops before it is handled.
 """
 
 import asyncio
+from copy import deepcopy
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 import hashlib
@@ -21,6 +22,15 @@ import uvicorn
 logger = logging.getLogger(__name__)
 
 IssueHandler = Callable[[str], Awaitable[None]]
+
+
+def request_log_config() -> dict:
+    """Timestamp Uvicorn lifecycle and access logs, including health checks."""
+    config = deepcopy(uvicorn.config.LOGGING_CONFIG)
+    for formatter in config["formatters"].values():
+        formatter["fmt"] = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+        formatter["use_colors"] = False
+    return config
 
 
 @dataclass(frozen=True)
@@ -157,6 +167,7 @@ async def run_jira_webhook_service(
             host=config.host,
             port=config.port,
             log_level="info",
+            log_config=request_log_config(),
         )
     )
 

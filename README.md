@@ -7,13 +7,23 @@
 3. uses Lightrun to observe the running application;
 4. posts the investigation result back to Jira.
 
+<img width="1088" height="692" alt="Lightrun-Jira-enrichment-agent" src="https://github.com/user-attachments/assets/3e76f271-f663-44cb-ac49-e3791cda2a2e" />
+
+Sample agent posts to Jira tickets:
+
+<img width="1470" height="948" alt="jira-agent-image1" src="https://github.com/user-attachments/assets/9a7de842-4f25-472e-bfbd-f95936d4b5fa" />
+
+<img width="556" height="768" alt="jira-agent-image2" src="https://github.com/user-attachments/assets/d2478ad0-174f-4e67-86c8-46325a3df5a6" />
+
+---
+
 The script supports two ways to discover tickets:
 
 - `JIRA_TRIGGER_MODE=poll` searches Jira every 30 seconds. This is the default behavior, suitable for running in a local demo.
 - `JIRA_TRIGGER_MODE=webhook` runs a small HTTP server. Jira calls it as soon as
   an issue is created. Requires a publicly accessible endpoint.
 
-This guide focuses on webhook mode and a small Ubuntu AWS EC2 instance.
+This guide focuses on setting up the agent to run in webhook mode on a small Ubuntu AWS EC2 instance.
 
 ## Demo architecture
 
@@ -29,38 +39,50 @@ Caddy container on EC2 (TLS, ports 80/443)
 Agent container: FastAPI receiver -> in-memory queue -> one worker
                                           |
                                           +-> Jira REST API
-                                          +-> GitHub MCP
+                                          +-> GitHub REST (budgeted local tools)
                                           +-> Lightrun MCP
-                                          +-> OpenAI
+                                          +-> OpenAI API
 ```
 
 The webhook endpoint verifies Jira's HMAC signature, queues the issue key, and
 returns immediately. The worker fetches the current issue from Jira before
-processing it. A ticket is eligible only when:
+processing it. 
 
-- its type is `Task`;
-- its summary is exactly `Agent`;
-- it is assigned to the Jira user configured for the script;
-- it has neither `ai-agent-processing` nor `ai-agent-completed`.
+## Repository understanding and source caching
 
-Only `jira:issue_created` is handled. The demo assumes all required fields are
-already present when the ticket is created.
+Repository access uses local wrappers around GitHub's REST API and authenticates with
+`GITHUB_MCP_PAT`. The token needs read access to repository contents. 
 
-## Source access and caching
+Each investigation starts by reading the locally learned repository map. When
+knowledge is insufficient, the agent lists the repository tree, reads README and
+other files, and explores likely applications and their source. It records
+component responsibilities, aliases, entry points, relationships and other information 
+in the learned repo map, in order to minimize the need to transfer information 
+from GitHub per investigation.
 
-The agent uses GitHub repository search only to locate likely files. Once it
-finds a candidate, `cache_and_read_github_file` resolves the configured Git ref,
-downloads and verifies the file, caches it locally, and returns authoritative
-numbered source in one tool call. Additional ranges are read from that verified
-local copy.
+Human readable notes are stored under
+`.agent-source-cache/<owner>/<repo>/.knowledge/repo-map.md`, with `notes.json` as
+the structured backing store. 
 
-A branch such as `main` is resolved once per running agent process, so one
-investigation cannot accidentally mix revisions and parallel file reads do not
-repeat the same resolution request. Previously verified files at that commit are
-reused for later tickets while the container remains running. The cache is an
-implementation detail and can be discarded safely; it will be rebuilt from
-GitHub when needed. Restart the agent after deploying a new revision so a branch
-name is resolved again.
+`REPO_GITHUB_REQUEST_LIMIT` defaults to **10 GitHub HTTP requests per
+investigation**.
+
+`REPO_CACHE_TTL_SECONDS` defaults to **86400 (24 hours)** for source validation
+and note evidence. 
+
+Cold-start orientation shares the request allowance; later tickets reuse learned
+knowledge. Exploration stops early when sufficient source is found. If the budget
+is exhausted, the agent can still use fresh local evidence and save notes. If
+that is insufficient, it reports explored components, remaining uncertainty, and
+the limit encountered. These workflow choices are prompt-guided; HTTP budgeting and 
+cache validation are enforced in code.
+
+`REPO_CACHE_ROOT` can override `.agent-source-cache`. Docker Compose mounts a named
+volume at `/app/.agent-source-cache`, preserving the map and cache across container
+recreation. If overriding the path in Docker, update the volume mount too. Deleting
+the cache is safe, but discards learned notes and starts repository orientation over.
+
+Run local regression checks with `python -m unittest discover -v`.
 
 ## Intentional demo shortcuts
 
@@ -177,9 +199,17 @@ Create an EC2 instance with:
 
 - Ubuntu Server 24.04 LTS;
 - a `t3.small` instance for a comfortable demo baseline;
-- at least 16 GB of storage;
+- one `gp3` EBS root volume with at least 16 GiB of storage;
 - a public IPv4 address, preferably an Elastic IP so it does not change;
 - the standard outbound internet access.
+
+In **Configure storage**, use these settings:
+
+| Setting | Choice for this demo |
+| --- | --- |
+| Root volume | Keep the existing root volume and select `gp3`. |
+| Add new volume | No additional volume is needed. |
+| File systems | Select **None**. |
 
 Configure its security group with these inbound rules:
 
@@ -285,6 +315,9 @@ Jira and the agent must use exactly the same webhook-secret value. The local
 environment file is ignored by Git and excluded from Docker builds.
 
 ### 5. Pull and start the demo
+
+Caddy must bind host ports 80 and 443, so even if you configure rootless
+Docker, run Compose with `sudo`.
 
 ```bash
 sudo docker compose --env-file jira-agent.env pull
@@ -419,6 +452,32 @@ The old application image remains available for a quick rollback: restore its
 tag in `jira-agent.env` and run the same `up -d agent` command.
 
 ## Troubleshooting
+
+### Log timestamps and GitHub discovery failures
+
+Application progress, model/tool timing, Uvicorn lifecycle messages, and HTTP
+access logs (including health checks) include timestamps. GitHub requests log
+their endpoint, HTTP status, and GitHub request ID without request headers or
+response bodies. A tool-level GitHub failure also includes its endpoint.
+
+`GITHUB_MCP_PAT` is used as a Bearer token for REST, as it already was for source
+downloads. A 404 alone does not identify the cause: GitHub can mask private-repo
+permission failures as 404, and missing refs/paths/objects also return 404.
+
+After deploying the updated image, run these read-only checks inside the agent
+container to use exactly its environment and token:
+
+```bash
+sudo docker compose --env-file jira-agent.env exec agent python diagnose_github.py
+```
+
+The check separates repository visibility, configured ref (`main` by default),
+and tree discovery. It prints no token or source content and does not contact
+Jira or Lightrun. If visibility fails, verify the repository name, PAT access to
+that repository, expiry, and organization approval/SSO. Fine-grained PATs need
+repository Contents read permission. If visibility succeeds but ref resolution
+fails, check the configured branch. See
+[GitHub's REST troubleshooting guide](https://docs.github.com/en/rest/using-the-rest-api/troubleshooting-the-rest-api).
 
 ### Jira never reaches the server
 
