@@ -16,12 +16,18 @@ import logging
 import os
 
 from fastapi import FastAPI, Header, HTTPException, Request, Response, status
+from pydantic import BaseModel, ConfigDict, Field
 import uvicorn
 
 
 logger = logging.getLogger(__name__)
 
 IssueHandler = Callable[[str], Awaitable[None]]
+
+
+class InvestigationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    issue_id: str = Field(pattern=r"^(?:[A-Z][A-Z0-9_]*-[1-9][0-9]*|[1-9][0-9]*)$", max_length=100)
 
 
 def request_log_config() -> dict:
@@ -40,9 +46,9 @@ class JiraWebhookConfig:
     port: int = 8080
 
     @classmethod
-    def from_environment(cls) -> "JiraWebhookConfig":
+    def from_environment(cls, require_secret: bool = True) -> "JiraWebhookConfig":
         secret = os.environ.get("JIRA_WEBHOOK_SECRET", "")
-        if not secret:
+        if require_secret and not secret:
             raise RuntimeError(
                 "JIRA_WEBHOOK_SECRET must be set when JIRA_TRIGGER_MODE=webhook"
             )
@@ -87,12 +93,25 @@ def create_webhook_app(
     async def live() -> dict[str, str]:
         return {"status": "ok"}
 
+    @app.post("/investigations", status_code=status.HTTP_202_ACCEPTED)
+    async def investigate(payload: InvestigationRequest) -> dict[str, str]:
+        # Deliberately unauthenticated for this demo. Reuse the bounded worker
+        # queue; Jira lookup and eligibility checks happen asynchronously.
+        try:
+            queue.put_nowait(payload.issue_id)
+        except asyncio.QueueFull:
+            raise HTTPException(status_code=503, detail="Investigation queue is full") from None
+        logger.info("Accepted manual investigation for Jira issue %s", payload.issue_id)
+        return {"status": "queued", "issue_id": payload.issue_id}
+
     @app.post("/webhooks/jira", status_code=status.HTTP_202_ACCEPTED)
     async def jira_webhook(
         request: Request,
         x_hub_signature: str | None = Header(default=None),
         x_atlassian_webhook_identifier: str | None = Header(default=None),
     ) -> Response:
+        if not secret:
+            raise HTTPException(status_code=503, detail="Jira webhook is not configured")
         body = await request.body()
         if not signature_is_valid(body, x_hub_signature, secret):
             raise HTTPException(
@@ -176,6 +195,8 @@ async def run_jira_webhook_service(
         config.host,
         config.port,
     )
+    logger.info("Manual investigation endpoint: POST http://%s:%d/investigations (unauthenticated)",
+                config.host, config.port)
     server_task = asyncio.create_task(server.serve())
     worker_task = asyncio.create_task(_consume_issues(queue, handle_issue))
 

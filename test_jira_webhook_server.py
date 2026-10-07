@@ -48,6 +48,36 @@ class JiraWebhookAppTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self) -> None:
         await self.client.aclose()
 
+    async def test_manual_trigger_accepts_key_and_numeric_id_without_auth(self):
+        for issue_id in ("DEMO-42", "10042"):
+            response = await self.client.post("/investigations", json={"issue_id": issue_id})
+            self.assertEqual(response.status_code, 202)
+            self.assertEqual(response.json(), {"status": "queued", "issue_id": issue_id})
+            self.assertEqual(self.queue.get_nowait(), issue_id)
+
+    async def test_manual_trigger_rejects_invalid_input(self):
+        for payload in ({}, {"issue_id": "../other"}, {"issue_id": 42},
+                        {"issue_id": "DEMO-42", "extra": True}, {"issue_id": ""}):
+            response = await self.client.post("/investigations", json=payload)
+            self.assertEqual(response.status_code, 422)
+        self.assertTrue(self.queue.empty())
+
+    async def test_manual_trigger_full_queue(self):
+        queue = asyncio.Queue(maxsize=1)
+        queue.put_nowait("DEMO-1")
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(
+                app=create_webhook_app(queue, SECRET)), base_url="http://test") as client:
+            response = await client.post("/investigations", json={"issue_id": "DEMO-2"})
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(queue.get_nowait(), "DEMO-1")
+
+    async def test_rest_without_secret_accepts_manual_but_disables_webhook(self):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(
+                app=create_webhook_app(self.queue, "")), base_url="http://test") as client:
+            response = await client.post("/investigations", json={"issue_id": "DEMO-42"})
+            self.assertEqual(response.status_code, 202)
+            self.assertEqual((await client.post("/webhooks/jira", json={})).status_code, 503)
+
     async def test_accepts_and_queues_created_issue(self) -> None:
         body = json.dumps(
             {

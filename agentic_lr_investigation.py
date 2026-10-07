@@ -499,9 +499,9 @@ async def jira_polling_worker(agent, checkpointer) -> None:
             await asyncio.sleep(POLL_INTERVAL_SECONDS)
 
 
-async def jira_webhook_worker(agent, checkpointer) -> None:
+async def jira_webhook_worker(agent, checkpointer, require_webhook_secret=True) -> None:
     """Process issue-created events received by the webhook server."""
-    config = JiraWebhookConfig.from_environment()
+    config = JiraWebhookConfig.from_environment(require_secret=require_webhook_secret)
 
     async with jira_client() as client:
         jira_account_id = await get_jira_account_id(client)
@@ -569,9 +569,11 @@ async def main() -> None:
         await jira_polling_worker(agent, checkpointer)
     elif trigger_mode == "webhook":
         await jira_webhook_worker(agent, checkpointer)
+    elif trigger_mode == "rest":
+        await jira_webhook_worker(agent, checkpointer, require_webhook_secret=False)
     else:
         raise RuntimeError(
-            "JIRA_TRIGGER_MODE must be either 'poll' or 'webhook'"
+            "JIRA_TRIGGER_MODE must be 'poll', 'webhook', or 'rest'"
         )
 
 

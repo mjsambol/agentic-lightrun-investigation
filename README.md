@@ -17,11 +17,13 @@ Sample agent posts to Jira tickets:
 
 ---
 
-The script supports two ways to discover tickets:
+The script supports three ways to trigger investigations:
 
 - `JIRA_TRIGGER_MODE=poll` searches Jira every 30 seconds. This is the default behavior, suitable for running in a local demo.
 - `JIRA_TRIGGER_MODE=webhook` runs a small HTTP server. Jira calls it as soon as
   an issue is created. Requires a publicly accessible endpoint.
+- `JIRA_TRIGGER_MODE=rest` exposes the manual `POST /investigations` endpoint
+  without requiring a webhook secret. The endpoint is also available in webhook mode.
 
 This guide focuses on setting up the agent to run in webhook mode on a small Ubuntu AWS EC2 instance.
 
@@ -99,6 +101,44 @@ then saved to `notes.json` and rendered to `repo-map.md`. This step is invoked b
 code rather than depending on the investigating agent to call the update tool.
 Early explicit map updates remain supported. Failed investigations also attempt
 to save partial knowledge after their failure comment has been posted.
+
+## Trigger an investigation manually over REST
+
+With `JIRA_TRIGGER_MODE=webhook`, the HTTP server also accepts manual requests.
+Alternatively, use `JIRA_TRIGGER_MODE=rest` to run the HTTP server without requiring
+`JIRA_WEBHOOK_SECRET`. Polling mode does not start this HTTP server. Host and port
+use the existing `JIRA_WEBHOOK_HOST` and `JIRA_WEBHOOK_PORT` settings.
+
+```bash
+curl -X POST https://jira-agent.example.com/investigations \
+  -H 'Content-Type: application/json' \
+  -d '{"issue_id":"DEMO-42"}'
+```
+
+`issue_id` accepts an uppercase Jira issue key such as `DEMO-42`, or a numeric
+Jira issue ID supplied as a string, such as `"10042"`. The response is HTTP 202:
+
+```json
+{"status":"queued","issue_id":"DEMO-42"}
+```
+
+The worker fetches the ticket from Jira and uses its description as the request.
+Results and knowledge saving follow the existing investigation workflow. HTTP
+202 means queued, not that the ticket exists or the investigation succeeded.
+Invalid payloads return 422; a full queue returns 503. Jira lookup errors appear
+in the worker logs. Existing eligibility checks apply: tickets marked
+`ai-agent-processing` or `ai-agent-completed` are skipped. To rerun a completed
+investigation, remove its completed label before submitting it again.
+
+**Demo limitation: this endpoint deliberately requires no authentication or
+signature and has no rate limiting. Anyone who can reach it can queue work using
+the agent's Jira, model, GitHub, and Lightrun credentials.** Add authentication,
+authorization and rate limiting before using it beyond a controlled demo.
+Requests share the in-memory queue and are lost on process restart.
+
+Jira webhook signatures remain required on `/webhooks/jira`. In REST mode with
+no webhook secret, that route returns 503; configuring a secret also enables
+signed webhook requests.
 
 ## Intentional demo shortcuts
 
