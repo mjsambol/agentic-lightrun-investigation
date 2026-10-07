@@ -7,7 +7,7 @@
 3. uses Lightrun to observe the running application;
 4. posts the investigation result back to Jira.
 
-<img width="1088" height="692" alt="Lightrun-Jira-enrichment-agent" src="https://github.com/user-attachments/assets/3e76f271-f663-44cb-ac49-e3791cda2a2e" />
+<img width="1088" height="692" alt="Lightrun-Jira-enrichment-agent" src="docs/images/Lightrun-Jira-enrichment-agent.png" />
 
 Sample agent posts to Jira tickets:
 
