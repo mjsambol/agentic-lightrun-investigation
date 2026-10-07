@@ -5,4 +5,4 @@ __pycache__/
 jira-agent.env
 .agent-source-cache/
 .langgraph_api/
-
+.DS_Store
