@@ -13,15 +13,16 @@ class RepositoryBudgetExceeded(RuntimeError):
 class RepositorySession:
     owner: str
     repo: str
-    request_limit: int = 10
+    request_limit: int = 20
     ttl_seconds: int = 86400
     requests_used: int = 0
     resolved_refs: dict = field(default_factory=dict)
     observed_commits: set[str] = field(default_factory=set)
+    inspected_source: dict[tuple[str, str, int, int], dict] = field(default_factory=dict)
 
     @classmethod
     def from_environment(cls, owner: str, repo: str):
-        limit = int(os.getenv("REPO_GITHUB_REQUEST_LIMIT", "10"))
+        limit = int(os.getenv("REPO_GITHUB_REQUEST_LIMIT", "20"))
         ttl = int(os.getenv("REPO_CACHE_TTL_SECONDS", "86400"))
         if limit < 0 or ttl <= 0:
             raise ValueError("Repository request limit must be nonnegative and TTL must be positive")

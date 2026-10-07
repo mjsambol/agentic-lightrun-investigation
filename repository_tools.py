@@ -4,6 +4,8 @@ from datetime import datetime, timezone
 import json
 import logging
 from pathlib import Path
+import re
+import textwrap
 from time import time
 from urllib.parse import quote
 
@@ -16,6 +18,27 @@ from repository_context import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def wrap_map_markdown(markdown: str) -> str:
+    """Wrap prose at 80 columns while preserving Markdown block structure."""
+    lines = []
+    fence = None
+    for line in markdown.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith(("```", "~~~")):
+            marker = stripped[:3]
+            fence = None if fence == marker else (fence or marker)
+            lines.append(line)
+        elif fence or not stripped or stripped.startswith("#") or line.startswith(("    ", "\t")):
+            lines.append(line)
+        else:
+            bullet = re.match(r"^(\s*(?:[-*+] |\d+[.)] ))", line)
+            lines.append(textwrap.fill(
+                line, width=80, break_long_words=False, break_on_hyphens=False,
+                subsequent_indent=" " * len(bullet[0]) if bullet else "",
+            ))
+    return "\n".join(lines) + "\n"
 
 
 def read_json(path: Path, default):
@@ -162,7 +185,9 @@ class RepositoryKnowledge:
                           f"Confidence: {note['confidence']} | Commit: {note['commit_sha']} | Updated: {stamp}", "",
                           *[f"- `{e['path']}` (blob `{e['blob_sha']}`, validated {e['validated_at']})"
                             for e in note["evidence"]], ""])
-        write_atomic(self.root / "repo-map.md", "\n".join(lines))
+        write_atomic(self.root / "repo-map.md", wrap_map_markdown("\n".join(lines)))
+        logger.info("Repository knowledge saved: component=%s map=%s", component,
+                    self.root / "repo-map.md")
         return {"status": "updated", "component": component,
                 "map_path": str(self.root / "repo-map.md")}
 
@@ -254,11 +279,34 @@ def create_repository_tools(owner: str, repo: str, default_ref: str):
             # Validate ranges before consuming network budget.
             if start_line < 1 or end_line < start_line or end_line - start_line >= 1000:
                 raise ValueError("Request 1-1000 lines with start_line >= 1")
-            return await cache.cache_and_read_github_file.ainvoke({
+            result = await cache.cache_and_read_github_file.ainvoke({
                 "owner": owner, "repo": repo, "ref": ref or default_ref,
                 "target_file": target_file, "start_line": start_line, "end_line": end_line,
             })
-        return await run(operation)
+            if result.get("start_line") is not None:
+                knowledge.session().inspected_source[
+                    (result["commit_sha"], result["repository_path"], start_line, end_line)
+                ] = {key: result[key] for key in ("commit_sha", "repository_path", "source")}
+            return result
+        try:
+            result = await run(operation)
+        except Exception:
+            logger.exception("Repository file read failed: file=%r ref=%r requested_lines=%s-%s "
+                             "requests_remaining=%s", target_file, ref or default_ref,
+                             start_line, end_line, knowledge.session().budget()["requests_remaining"])
+            raise
+        if result.get("start_line") is not None:
+            logger.info("Repository file read succeeded: file=%r commit=%s returned_lines=%s-%s "
+                        "cache_hit=%s requests_remaining=%s", result["repository_path"],
+                        result["commit_sha"], result["start_line"], result["end_line"],
+                        result["cache_hit"], result["requests_remaining"])
+        else:
+            logger.warning("Repository file read returned no numbered source: file=%r ref=%r "
+                           "commit=%s status=%s requested_lines=%s-%s requests_remaining=%s",
+                           target_file, ref or default_ref, result.get("commit_sha", "unknown"),
+                           result.get("status", "empty_or_out_of_range"), start_line, end_line,
+                           result["requests_remaining"])
+        return result
 
     @tool
     async def search_repository_code(terms: str, directory: str = "") -> dict:
@@ -285,6 +333,7 @@ def create_repository_tools(owner: str, repo: str, default_ref: str):
         try:
             result = knowledge.update(component, summary, evidence_paths, commit_sha, confidence)
         except (ValueError, FileNotFoundError) as error:
+            logger.warning("Repository knowledge update rejected: %s", error)
             result = {"status": "error", "message": str(error)}
         return {**result, **knowledge.session().budget()}
 

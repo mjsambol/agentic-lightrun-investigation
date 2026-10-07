@@ -16,6 +16,7 @@ load_dotenv()
 
 from repository_context import RepositorySession, repository_session
 from repository_tools import create_repository_tools
+from repository_learning import save_repository_knowledge
 from logging_utils import configure_logging, log_agent_model_call, log_agent_tool_call
 
 GITHUB_OWNER = "lightrun-platform"
@@ -189,6 +190,9 @@ Repository orientation and source discovery:
    then relevant application documentation and source. Infer responsibilities
    from file contents, not directory names alone. Explore iteratively.
 3. Use read_repository_file for all source/documentation and additional ranges.
+   As soon as the map, tree, or search identifies a promising file, read and
+   assess it before issuing more searches or reading less likely candidates.
+   Continue discovery only if that source cannot answer the investigation need.
    It returns verified numbered source, caches downloads, and revalidates stale
    files. Read supplied paths directly. Default ref is {GITHUB_REF}; use another
    ref when identified by the user or a deployed SHA when available. Record the
@@ -203,7 +207,9 @@ Repository orientation and source discovery:
 6. If understanding is still insufficient, use the tree, source reads and
    search_repository_code to expand it. Search is optional and uses GitHub's
    default-branch index, so zero hits do not prove absence at the selected ref.
-7. Tools share an enforced GitHub HTTP request budget (default 10 per ticket).
+7. Tools share an enforced GitHub HTTP request budget (default 20 per ticket).
+   This is a ceiling, not a target: do not spend remaining requests once you
+   have a relevant, verified executable line and the needed variables in scope.
    Local map operations and fresh cached reads do not consume it. Check returned
    requests_remaining and use requests purposefully. Stop discovery early when
    you have sufficient verified source for a sound investigation point.
@@ -222,6 +228,9 @@ Authoritative source and line-number rules:
 
 1. Only numbered source returned by read_repository_file is authoritative for
    instrumentation. Use the numbers left of the "|" separator; never count lines.
+   Calling the tool is not evidence of reading source: inspect its actual result.
+   A budget_exhausted, not_found, error, or empty/out-of-range result provides no
+   executable line. Do not invent a line number or use line 1 as a placeholder.
 2. Never use line numbers from search snippets.
 3. Never instrument from stale notes alone. Read verified source at the selected
    commit and report any mismatch with the deployed revision.
@@ -246,10 +255,18 @@ Lightrun investigation workflow:
 4. Identify a relevant line of code where variables of interest are in scope. 
    Interpret "of interest" to mean those which knowing their value would help understand the behavior of the code,
    as relevant to the investigation at hand.
+   Before every snapshot_create call, including retries, confirm that you have
+   already read the exact requested line in authoritative numbered source for
+   the selected file and commit, that it is executable and satisfies the rules
+   below, and that the condition/watch expressions are meaningful in its scope.
+   Verify source BEFORE attempting insertion; never use snapshot creation as a
+   probe to discover a valid line. If source verification is unavailable, stop
+   and explain the limitation. Budget exhaustion never relaxes this prerequisite.
 5. Do not instrument:
    - comments
    - blank lines
    - imports
+   - package declarations
    - annotations
    - declarations with no executable behavior
    - a line merely because its number was mentioned without verifying its contents
@@ -316,14 +333,15 @@ from jira_webhook_server import (
 )
 
 
-async def run_agent_for_issue(agent, checkpointer, client, issue) -> None:
+async def run_agent_for_issue(agent, checkpointer, client, issue, knowledge_session=None) -> None:
     # Shared mutable state propagates through async tool calls. Keep the same
     # budget across the existing retry, but isolate every Jira investigation.
     token = repository_session.set(
-        RepositorySession.from_environment(GITHUB_OWNER, GITHUB_REPO)
+        knowledge_session or RepositorySession.from_environment(GITHUB_OWNER, GITHUB_REPO)
     )
     try:
         await _run_agent_for_issue(agent, checkpointer, client, issue)
+        await save_repository_knowledge(issue["key"], GITHUB_REF)
     finally:
         repository_session.reset(token)
 
@@ -413,10 +431,13 @@ async def process_issue(
     issue: dict[str, Any],
 ) -> None:
     issue_key = issue["key"]
+    knowledge_session = RepositorySession.from_environment(GITHUB_OWNER, GITHUB_REPO)
+    investigation_replied = False
 
     try:
         await set_issue_labels(client, issue_key, add=[PROCESSING_LABEL])
-        await run_agent_for_issue(agent, checkpointer, client, issue)
+        await run_agent_for_issue(agent, checkpointer, client, issue, knowledge_session)
+        investigation_replied = True
         await set_issue_labels(
             client,
             issue_key,
@@ -436,6 +457,12 @@ async def process_issue(
                 issue_key,
                 f"Agent processing failed:\n\n{type(exc).__name__}: {exc}",
             )
+            if not investigation_replied:
+                token = repository_session.set(knowledge_session)
+                try:
+                    await save_repository_knowledge(issue_key, GITHUB_REF)
+                finally:
+                    repository_session.reset(token)
             await set_issue_labels(
                 client,
                 issue_key,

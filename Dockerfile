@@ -18,6 +18,7 @@ COPY --chown=agent:agent agentic_lr_investigation.py ./
 COPY --chown=agent:agent cache_git_files.py ./
 COPY --chown=agent:agent repository_context.py ./
 COPY --chown=agent:agent repository_tools.py ./
+COPY --chown=agent:agent repository_learning.py ./
 COPY --chown=agent:agent diagnose_github.py ./
 COPY --chown=agent:agent jira_access_tools.py ./
 COPY --chown=agent:agent jira_webhook_server.py ./

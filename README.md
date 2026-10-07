@@ -64,7 +64,7 @@ Human readable notes are stored under
 `.agent-source-cache/<owner>/<repo>/.knowledge/repo-map.md`, with `notes.json` as
 the structured backing store. 
 
-`REPO_GITHUB_REQUEST_LIMIT` defaults to **10 GitHub HTTP requests per
+`REPO_GITHUB_REQUEST_LIMIT` defaults to **20 GitHub HTTP requests per
 investigation**.
 
 `REPO_CACHE_TTL_SECONDS` defaults to **86400 (24 hours)** for source validation
@@ -83,6 +83,22 @@ recreation. If overriding the path in Docker, update the volume mount too. Delet
 the cache is safe, but discards learned notes and starts repository orientation over.
 
 Run local regression checks with `python -m unittest discover -v`.
+
+### Saving learned knowledge after a Jira reply
+
+After all Jira response chunks have been posted, the code runs a separate
+knowledge-consolidation model pass. It uses source excerpts inspected
+in that investigation and relevant existing component notes. This process
+consumes no additional GitHub request budget. It does make
+an additional model request (or requests for large batches), with a 120-second
+overall timeout. Ticket text and Lightrun runtime data are not supplied to this
+pass.
+
+The returned component notes are validated against inspected paths and commits,
+then saved to `notes.json` and rendered to `repo-map.md`. This step is invoked by
+code rather than depending on the investigating agent to call the update tool.
+Early explicit map updates remain supported. Failed investigations also attempt
+to save partial knowledge after their failure comment has been posted.
 
 ## Intentional demo shortcuts
 

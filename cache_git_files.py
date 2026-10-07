@@ -621,6 +621,8 @@ async def cache_and_read_github_file(
         "repository_path": manifest["repository_path"],
         "line_count": manifest["line_count"],
         "cache_hit": manifest["cache_hit"],
+        "start_line": start_line if start_line <= manifest["line_count"] else None,
+        "end_line": min(end_line, manifest["line_count"]) if start_line <= manifest["line_count"] else None,
         "source": source,
     }
 

@@ -229,6 +229,36 @@ class RepositoryToolsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "error")
         self.assertEqual(len(self.calls), 0)
 
+    async def test_read_logs_actual_range_cache_hit_and_budget_failure(self):
+        with self.assertLogs("repository_tools", level="INFO") as logs:
+            result = await self.read()
+            await self.read()
+        self.assertEqual((result["start_line"], result["end_line"]), (1, 1))
+        text = "\n".join(logs.output)
+        self.assertIn("returned_lines=1-1", text)
+        self.assertIn("cache_hit=False", text)
+        self.assertIn("cache_hit=True", text)
+        self.assertIn("requests_remaining=7", text)
+        self.assertIn(COMMIT, text)
+        self.new_session(limit=0)
+        with self.assertLogs("repository_tools", level="WARNING") as logs:
+            await self.read()
+        self.assertIn("status=budget_exhausted", "\n".join(logs.output))
+
+    async def test_out_of_range_read_is_not_recorded_as_inspected_source(self):
+        with self.assertLogs("repository_tools", level="WARNING") as logs:
+            result = await self.read(start_line=20, end_line=30)
+        self.assertIsNone(result["start_line"])
+        self.assertIsNone(result["end_line"])
+        self.assertFalse(repository_session.get().inspected_source)
+        self.assertIn("empty_or_out_of_range", "\n".join(logs.output))
+
+    def test_default_request_budget_and_environment_override(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(RepositorySession.from_environment(OWNER, REPO).request_limit, 20)
+        with patch.dict(os.environ, {"REPO_GITHUB_REQUEST_LIMIT": "7"}):
+            self.assertEqual(RepositorySession.from_environment(OWNER, REPO).request_limit, 7)
+
     async def test_note_ttl_uses_evidence_time_not_summary_write_time(self):
         await self.read()
         self.now += 86000

@@ -39,6 +39,7 @@ def configure_logging() -> None:
     for name in (
         "__main__", "agentic_lr_investigation", "logging_utils",
         "jira_webhook_server", "repository_tools", "cache_git_files",
+        "repository_learning",
     ):
         logging.getLogger(name).setLevel(logging.INFO)
 
